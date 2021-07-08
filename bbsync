@@ -1,0 +1,598 @@
+#!/bin/bash
+
+#{{{ parameter parsing
+shopt -s extglob
+verbose=0
+dryRun=0
+minshow=0
+progress=1
+processes=1
+server=""
+usage="Usage: $(basename "$0") [OPTIONS]
+  -d, --dry-run           perform a trial run with no changes made
+  --minshow NUM           minimum time in seconds to show actions
+  --no-progress           do not show progress during transfer
+  -p, --processes NUM     number of processes to use
+  --server URL            master server URL
+  -v, --verbose           output a diagnostic for every file that will be processed
+  -h, --help              display this help
+"
+for (( i=1; i <= $#; i++ )); do
+	[ "${!i:0:1}" != "-" ] && { printf "$usage"; exit 2; }
+	if [ "${!i:1:1}" = "-" ]; then
+
+	#{{{ long parameters
+		case "${!i}" in
+			--dry-run)
+				dryRun=1
+			;;
+			--minshow)
+				i=$((i+1))
+				minshow="${!i}"
+			;;
+			--progress)
+				progress=0
+			;;
+			--processes)
+				i=$((i+1))
+				processes="${!i}"
+			;;
+			--server)
+				i=$((i+1))
+				server="${!i}"
+			;;
+			--verbose)
+				verbose=1
+			;;
+			*)
+				printf "$usage" >&2
+				exit 2
+			;;
+		esac
+		#}}}
+
+	else
+
+	#{{{ short parameters
+		bumped=false
+		case "${!i}" in
+			*d*)
+				dryRun=1
+			;;&
+			*p*)
+				[ "$bumped" = false ] && i=$((i+1)) && bumped=true
+				processes="${!i}"
+			;;&
+			*v*)
+				verbose=1
+			;;&
+			!(-+([dpv])))
+				printf "$usage" >&2
+				exit 2
+			;;
+		esac
+	#}}}
+
+	fi
+done
+#}}}
+
+#{{{ parameter validation
+	#{{{ minshow
+case "$minshow" in
+	""|*[!0-9]*)
+		printf "$usage" >&2
+		exit 2
+	;;
+esac
+	#}}}
+
+	#{{{ processes
+case "$processes" in
+	""|"0"|*[!0-9]*)
+		printf "$usage" >&2
+		exit 2
+	;;
+esac
+	#}}}
+
+[ "$(curl --insecure --connect-timeout 5 --silent -o /dev/null --write-out "%{http_code}" "$server/bbsync")" = "200" ] || { printf "Unable to connect to server!\n" >&2; exit 1; }
+#}}}
+
+#{{{ startup and safety checks
+owd="$PWD"
+printf "Note that symlinks will be created as normal files/folders if they do not already exist. Run \`find -L sync/* -mindepth 1 -xtype l\` to list any.\n" >&2
+cd -- "$(dirname "$0")/sync" || { printf "sync dir does not exist!" >&2; exit 1; }
+trap 'cd -- "$owd"' EXIT
+exit() {
+	cd -- "$owd"
+	trap - EXIT
+	unset -f exit
+	exit "$@"
+}
+# abnormal exits cause this to not trigger if using -p
+{ [ -f ../skipdirs ] || [ -e ../actions ] || [ -e ../processes ]; } && { printf "FIFO(s) exist! Not running in case of mangled data or another process.\n" >&2; cd -- "$owd"; exit 1; }
+[ -w .. ] || { printf "Cannot write to bbsync dir!\n" >&2; exit 1; }
+rm -f ../bbsync-list-master || { printf "Could not remove old bbsync-list-master!\n" >&2; exit 1; }
+rm -f ../bbsync-list || { printf "Could not remove old bbsync-list!\n" >&2; exit 1; }
+rm -f ../bbsync-list-last-backup || { printf "Could not remove bbsync-list-last-backup!\n" >&2; exit 1; }
+rm -f ../log || { printf "Could not remove old log!\n" >&2; exit 1; }
+{ [ ! -e ../bbsync-list-last ] || [ -w ../bbsync-list-last ]; } || { printf "Cannot write to bbsync-list-last!\n" >&2; exit 1; }
+
+	#{{{ detect corruption
+if [ ! -f ../bbsync-list-last ]; then
+	read -p "Is this a fresh sync? If not, bbsync-list-last is missing - other files may be corrupted! Other corrupted files will result in an error and not be transferred unless their modification date is newer (try a dry run). (yes/no): " 2>&1
+	[ "$REPLY" = "yes" ] || exit 1
+else
+	if [ "$(tail -n 1 ../bbsync-list-last)" != "END" ]; then
+		printf "bbsync-list-last corrupted! Delete it, this will restore deleted files on either end. Other corrupted files will result in an error and not be transferred unless their modification date is newer (try a dry run).\n" >&2
+		exit 1
+	fi
+fi
+	#}}}
+#}}}
+
+#{{{ abort
+p_master=
+p_actions=
+aborting=0
+abort() {
+	trap "" SIGINT
+	aborting=1
+	printf "\r\033[K"
+	# suppressing stderr on kill because they may have exited already
+	if [ -n "$p_actions" ]; then
+		printf "\033[KAborting. . . \r"
+		kill -0 $p_actions 2>/dev/null && { printf "END\n" > ../actions & kill $p_actions 2>/dev/null; }
+		# TODO: kill curls, letting their restores trigger and subprocesses to exit
+		[ "$(head -n 1 ../bbsync-list-last)" = "END" ] && rm ../bbsync-list-last
+	elif [ -n "$p_master" ]; then
+		kill $p_master 2>/dev/null
+		rm ../bbsync-list ../bbsync-list-master ../skipdirs
+		exit 1
+	else
+		exit 1
+	fi
+}
+trap "abort" SIGINT
+#}}}
+
+#{{{ generate bbsync-lists
+{ [ "$(curl --insecure --silent -o ../bbsync-list-master --write-out "%{http_code}" "$server/sync/bbsync-list")" = "200" ] || printf "FAILED\n" > ../bbsync-list-master; } &
+p_master=$!
+find -L . -mindepth 1 -type d -prune | LC_ALL=C sort > ../bbsync-list
+printf "END SYNC FOLDERS\n" >> ../bbsync-list
+find -L . -mindepth 2 -not \( -name ".git" -prune \) | while IFS= read -r file; do
+	[ "${file: -11}" = ".bak-bbsync" ] && continue
+	printf "%s%s %s\n" "$(stat -L -c "%n %a %Y %s" "$file")" "$(cksum "$file" 2>/dev/null | cut -d " " -f 1)" "$([ -d "$file" ] && printf "d" || printf "f")"
+done | LC_ALL=C sort >> ../bbsync-list; printf "END\n" >> ../bbsync-list
+wait $p_master
+[ "$(tail -n 1 ../bbsync-list-master)" = "FAILED" ] && { printf "Failed to get bbsync-list-master!\n" >&2; exit 1; }
+[ "$(tail -n 1 ../bbsync-list-master)" != "END" ] && { printf "bbsync-list-master corrupted!\n" >&2; exit 1; }
+#}}}
+
+source <({
+
+#{{{ skipdirs
+	IFS= read -r dir <&3
+	IFS= read -r dirMaster <&4
+	while true; do
+		if [ "$dir" != "$dirMaster" ]; then
+			# must be single bracket test
+			if { [ "$dirMaster" = "END SYNC FOLDERS" ] || [ "$dir" \< "$dirMaster" ]; } && [ "$dir" != "END SYNC FOLDERS" ]; then
+				printf "%s\n" "$dir"
+				IFS= read -r dir <&3
+			else
+				printf "%s\n" "$dirMaster"
+				IFS= read -r dirMaster <&4
+			fi
+		else
+			if [ "$dir" != "END SYNC FOLDERS" ]; then
+				IFS= read -r dir <&3
+				IFS= read -r dirMaster <&4
+			else
+				break
+			fi
+		fi
+	done
+	printf "END SYNC FOLDERS\n"
+#}}}
+
+} 3<../bbsync-list 4<../bbsync-list-master | tee ../skipdirs | {
+
+#{{{ get non-skipped file count
+	#{{{ variable prep
+	total=0
+	line=; while [ "$line" != "END SYNC FOLDERS" ]; do IFS= read -r line <&3; done
+	lineMaster=; while [ "$lineMaster" != "END SYNC FOLDERS" ]; do IFS= read -r lineMaster <&4; done
+	IFS= read -r line <&3
+	IFS= read -r lineMaster <&4
+	IFS= read -r skipdir
+	#}}}
+
+	while true; do
+
+	#{{{ skipdirs
+		if [ "$(eval 'printf "%s" "${line::'${#skipdir}}'"')" = "$skipdir" ]; then
+			while [ "$(eval 'printf "%s" "${line::'${#skipdir}}'"')" = "$skipdir" ]; do
+				IFS= read -r line <&3
+			done
+			IFS= read -r skipdir
+		elif [ "$(eval 'printf "%s" "${lineMaster::'${#skipdir}}'"')" = "$skipdir" ]; then
+			while [ "$(eval 'printf "%s" "${lineMaster::'${#skipdir}}'"')" = "$skipdir" ]; do
+				IFS= read -r lineMaster <&4
+			done
+			IFS= read -r skipdir
+		fi
+	#}}}
+
+		if [ "${line% * * * *}" != "${lineMaster% * * * *}" ]; then
+			if [ "$line" != "END" ] && { [ "$lineMaster" = "END" ] || [ "$line" \< "$lineMaster" ]; }; then
+				total=$((total+1))
+				IFS= read -r line <&3
+			else
+				total=$((total+1))
+				IFS= read -r lineMaster <&4
+			fi
+		else
+			if [ "$line" != "$lineMaster" ]; then
+				total=$((total+1))
+			else
+				[ "$line" = "END" ] && break
+			fi
+			IFS= read -r line <&3
+			IFS= read -r lineMaster <&4
+		fi
+	done
+	printf "total=$total"
+#}}}
+
+} 3<../bbsync-list 4<../bbsync-list-master)
+
+[ -f ../bbsync-list-last ] || printf "END SYNC FOLDERS\nEND\n" > ../bbsync-list-last
+
+done=0
+errors=0
+
+#{{{ actions
+mkfifo ../actions; {
+
+	#{{{ variable prep
+	line=; while [ "$line" != "END SYNC FOLDERS" ]; do IFS= read -r line <&3; done
+	lineMaster=; while [ "$lineMaster" != "END SYNC FOLDERS" ]; do IFS= read -r lineMaster <&4; done
+	lineLast=; while [ "$lineLast" != "END SYNC FOLDERS" ]; do IFS= read -r lineLast <&6; done
+	IFS= read -r line <&3
+	IFS= read -r lineMaster <&4
+	IFS= read -r skipdir <&5
+	IFS= read -r lineLast <&6
+	#}}}
+
+	while true; do
+
+	#{{{ skipdirs
+		if [ "$(eval 'printf "%s" "${line::'${#skipdir}}'"')" = "$skipdir" ]; then
+			while [ "$(eval 'printf "%s" "${line::'${#skipdir}}'"')" = "$skipdir" ]; do IFS= read -r line <&3; done
+			IFS= read -r skipdir <&5
+		elif [ "$(eval 'printf "%s" "${lineMaster::'${#skipdir}}'"')" = "$skipdir" ]; then
+			while [ "$(eval 'printf "%s" "${lineMaster::'${#skipdir}}'"')" = "$skipdir" ]; do IFS= read -r lineMaster <&4; done
+			IFS= read -r skipdir <&5
+		fi
+	#}}}
+
+		file="${line% * * * *}"
+		fileMaster="${lineMaster% * * * *}"
+		# must be single bracket test
+		while { [ "$file" = "END" ] || [ "${lineLast% * * * *}" \< "$file" ]; } && { [ "$fileMaster" = "END" ] || [ "${lineLast% * * * *}" \< "$fileMaster" ]; } && [ "$lineLast" != "END" ]; do IFS= read -r lineLast <&6; done
+		if [ "$file" != "$fileMaster" ]; then
+
+	#{{{ missing on one end
+			# must be single bracket test
+			if [ "$file" != "END" ] && { [ "$fileMaster" = "END" ] || [ "$file" \< "$fileMaster" ]; }; then
+				# meta/data could have changed too, so not comparing using line
+				if [ "$lineLast" = "END" ] || [ "$file" != "${lineLast% * * * *}" ]; then
+					printf "%s0\n" "$line"
+				else
+					printf "%s5\n" "$line"
+				fi
+				IFS= read -r line <&3
+			else
+				# meta/data could have changed too, so not comparing using line
+				if [ "$lineLast" = "END" ] || [ "$fileMaster" != "${lineLast% * * * *}" ]; then
+					printf "%s1\n" "$lineMaster"
+				else
+					printf "%s4\n" "$lineMaster"
+				fi
+				IFS= read -r lineMaster <&4
+			fi
+	#}}}
+
+		else
+			[ "$file" = "END" ] && break
+			if [ "$line" != "$lineMaster" ]; then
+
+	#{{{ updated on one end
+
+		#{{{ variable prep
+				fileF="${line##* }"; line="${line% *}"
+				fileH="${line##* }"; line="${line% *}"
+				fileD="${line##* }"; line="${line% *}"
+				fileP="${line##* }"; file="${line% *}"
+				fileMasterF="${lineMaster##* }"; lineMaster="${lineMaster% *}"
+				fileMasterH="${lineMaster##* }"; lineMaster="${lineMaster% *}"
+				fileMasterD="${lineMaster##* }"; lineMaster="${lineMaster% *}"
+				fileMasterP="${lineMaster##* }"; fileMaster="${lineMaster% *}"
+		#}}}
+
+				if [ "$fileH" = "$fileMasterH" ]; then
+
+		#{{{ only metadata changed
+					if [ $fileD -gt $fileMasterD ]; then
+						printf "%s %s %s %s %s2\n" "$file" "$fileP" "$fileD" "$fileH" "$fileF"
+					elif [ "$fileD" != "$fileMasterD" ]; then
+						printf "%s %s %s %s %s3\n" "$fileMaster" "$fileMasterP" "$fileMasterD" "$fileMasterH" "$fileMasterF"
+					else
+						if [ "$file $fileP $fileD $fileH $fileF" != "$lineLast" ]; then
+							printf "%s %s %s %s %s2\n" "$file" "$fileP" "$fileD" "$fileH" "$fileF"
+						else
+							printf "%s %s %s %s %s3\n" "$fileMaster" "$fileMasterP" "$fileMasterD" "$fileMasterH" "$fileMasterF"
+						fi
+					fi
+		#}}}
+
+				else
+
+		#{{{ modified
+					if [ "$fileD" -gt "$fileMasterD" ]; then
+						printf "%s %s %s %s %s0\n" "$file" "$fileP" "$fileD" "$fileH" "$fileF"
+					elif [ "$fileD" != "$fileMasterD" ]; then
+						printf "%s %s %s %s %s1\n" "$fileMaster" "$fileMasterP" "$fileMasterD" "$fileMasterH" "$fileMasterF"
+					else
+						done=$((done+1))
+						errors=$((errors+1))
+						printf "%s has been corrupted on one end! Mtimes are equal, size/hashes are not!\n" "$file" >> ../log
+					fi
+		#}}}
+
+				fi
+	#}}}
+
+			fi
+			IFS= read -r line <&3
+			IFS= read -r lineMaster <&4
+		fi
+	done
+	printf "END\n"
+} 3<../bbsync-list 4<../bbsync-list-master 5<../skipdirs 6<../bbsync-list-last > ../actions &
+p_actions=$!
+#}}}
+
+#{{{ printp
+printp() {
+	printf "\033[${1}B\033[K${2}\r\033[${1}A" "$3"
+}
+#}}}
+
+#{{{ processing actions
+mkfifo ../processes
+initialProcesses=1
+export process=1
+export COLUMNS
+
+	#{{{ info variables
+started=$done
+pushed=0
+pulled=0
+mmaster=0
+mlocal=0
+rmaster=0
+rlocal=0
+	#}}}
+
+for (( i=0; i < processes; i++ )); do
+	printf "\n"
+done
+printf "\033[${processes}A"
+if [ $total -ne 0 ]; then
+	while true; do
+		if [ $aborting -eq 0 ]; then
+			percent="0$((${done}00/total))"
+			printf "\033[K${percent: -2}%%, $done done, $total total, $errors error(s)\r" >&2
+			if [ "$line" != "END" ]; then
+				IFS= read -r line <&3
+				if [ "$line" != "END" ]; then
+
+	#{{{ variable prep
+					export fileO="${line: -1}"; line="${line:: -1}"
+					export fileF="${line##* }"; line="${line% *}"
+					line="${line% *}"
+					export fileD="${line##* }"; line="${line% *}"
+					export fileP="${line##* }"
+					export file="${line% *}"
+	#}}}
+
+	#{{{ actions
+					{
+						trap "" SIGINT
+						sleep $minshow &
+						p_minshowTime=$!
+						name="${file##*/}"
+						COLUMNS=$((COLUMNS-${#name}-5))
+						error=0
+						case "$fileO" in
+							"0")
+
+				#{{{ upload
+								if [ "$fileF" = "d" ]; then
+									curl --insecure --silent -o >(cat >> ../log) --write-out "%{http_code}" -F "path=$file" -F "perms=$fileP" -F "mtime=$fileD" -F "dir=1" "$server/sync" > >(
+										IFS= read -r code
+										[ "$code" = "200" ] || error=1
+									)
+									printp $process "--> %s" "$name DONE (directory)" >&2
+								else
+									curl --insecure --progress-bar -o >(cat >> ../log) --write-out "%{http_code}" -F "path=$file" -F "perms=$fileP" -F "mtime=$fileD" -F "size=$(stat -c "%s" "$file")" -F "file=@$(realpath "$file")" "$server/sync" > >(
+										IFS= read -r code
+										[ "$code" = "200" ] || error=1
+									) 2> >(
+										while IFS= read -r -d "%" progress; do
+											printp $process "--> %s" "$name #${progress#*#}%" >&2
+										done
+									)
+								fi
+				#}}}
+
+							;;
+							"1")
+
+				#{{{ download
+								if [ "$fileF" = "d" ]; then
+									mkdir -p "$file" 2>>../log || error=1
+									printp $process "<-- %s" "$name DONE (directory)" >&2
+								else
+									real="$(realpath "$file")"
+									if [ ! -e "$real" ] || mv -f "$real" "$real.bak-bbsync" 2>>../log; then
+										curl --insecure --progress-bar -o "$real" --write-out "%{http_code}" "$server/sync/$file" > >(
+											IFS= read -r code
+											[ "$code" = "200" ] || {
+												error=1
+												mv -f "$real.bak-bbsync" "$real" 2>>../log
+												printf "Failed to download %s.\n" "$file" >> ../log
+											}
+										) 2> >(
+											while IFS= read -r -d "%" progress; do
+												printp $process "<-- %s" "$name #${progress#*#}%" >&2
+											done
+										)
+									else
+										error=1
+									fi
+									rm -rf "$real.bak-bbsync" 2>>../log
+								fi
+								chmod $fileP "$file"
+								touch -m -d "@$fileD" "$file"
+				#}}}
+
+							;;
+							"2")
+
+				#{{{ change master metadata
+								curl --insecure --silent -o >(cat >> ../log) --write-out "%{http_code}" -F "path=$file" -F "perms=$fileP" -F "mtime=$fileD" "$server/sync" > >(
+									IFS= read -r code
+									[ "$code" = "200" ] || { error=1; printf "Failed to set master metadata of %s.\n" "$file" >> ../log; }
+								)
+								printp $process "--> %s" "$name DONE (metadata)" >&2
+				#}}}
+
+							;;
+							"3")
+
+				#{{{ change local metadata
+								chmod $fileP "$file" && touch -m -d "@$fileD" "$file" || {
+									[ "$code" = "200" ] || { error=1; printf "Failed to set local metadata of %s.\n" "$file" >> ../log; }
+								}
+				#}}}
+
+							;;
+							"4")
+
+			#{{{ remove master
+								curl --insecure --silent -o >(cat >> ../log) --write-out "%{http_code}" -F "path=$file" -F "remove=1" "$server/sync" > >(
+									IFS= read -r code
+									[ "$code" = "200" ] || error=1
+								)
+								printp $process "--> %s" "$name DONE (remove)" >&2
+			#}}}
+
+							;;
+							"5")
+
+			#{{{ remove local
+								if [ -e "$file" ]; then
+									rm -rf "$file" 2>>../log || error=1
+								fi
+								printp $process "<-- %s" "$name DONE (remove)" >&2
+			#}}}
+
+							;;
+						esac
+						wait $p_minshowTime
+						printf "$process $fileO $error\n" > ../processes
+					} &
+					started=$((started+1))
+	#}}}
+
+					if [ $initialProcesses -lt $processes ]; then
+						initialProcesses=$((initialProcesses+1))
+						export process=$initialProcesses
+						continue
+					fi
+				else
+					done=$((done-1))
+					printf "$process N 0\n" > ../processes &
+				fi
+			fi
+		else
+			printf "\033[KAborting, waiting on $((started-done)) process(es). . . \r" >&2
+		fi
+		IFS= read -r process <&4
+
+	#{{{ info variable updating
+		done=$((done+1))
+		if [ ${process##* } -eq 0 ]; then
+			process=${process% *}
+			case "${process#* }" in
+				"0")
+					pushed=$((pushed+1))
+				;;
+				"1")
+					pulled=$((pulled+1))
+				;;
+				"2")
+					mmaster=$((mmaster+1))
+				;;
+				"3")
+					mlocal=$((mlocal+1))
+				;;
+				"4")
+					rmaster=$((rmaster+1))
+				;;
+				"5")
+					rlocal=$((rlocal+1))
+				;;
+			esac
+		else
+			errors=$((errors+1))
+		fi
+	#}}}
+
+		export process=${process%% *}
+		{ [ $aborting -ne 0 ] || [ "$line" = "END" ]; } && [ $done -eq $started ] && break
+	done 3<../actions 4< <(tail -f ../processes)
+fi
+#}}}
+
+#{{{ cleanup
+trap "" SIGINT
+printf "\033[KFinishing up. . . \r" >&2
+
+	#{{{ ending status
+for (( i=0; i < processes; i++ )); do
+	printf "\033[B\033[K"
+done
+printf "\033[${processes}A"
+	#}}}
+
+	#{{{ bbsync-lists
+rm ../bbsync-list ../bbsync-list-master ../skipdirs ../actions ../processes
+[ $errors -ne 0 ] && mv ../bbsync-list-last ../bbsync-list-last-backup
+find -L . -mindepth 1 -type d -prune | LC_ALL=C sort > ../bbsync-list-last
+printf "END SYNC FOLDERS\n" >> ../bbsync-list-last
+find -L . -mindepth 2 -not \( -name ".git" -prune \) | while IFS= read -r file; do
+	[ "${file: -11}" = ".bak-bbsync" ] && continue
+	printf "%s%s %s\n" "$(stat -L -c "%n %a %Y %s" "$file")" "$(cksum "$file" 2>/dev/null | cut -d " " -f 1)" "$([ -d "$file" ] && printf "d" || printf "f")"
+done | LC_ALL=C sort >> ../bbsync-list-last; printf "END\n" >> ../bbsync-list-last
+	#}}}
+
+printf "\033[K\n[<--|-->]: [$pulled|$pushed] were added/modified, [$mlocal|$mmaster] changed metadata, [$rlocal|$rmaster] were removed, and $errors error'd of $total total.\n"
+[ $errors -ne 0 ] && printf "There were errors, check the log. Any files that failed to transfer to the master server will be deleted here next run. You can overwrite bbsync-list-last with bbsync-list-last-backup to retry this sync.\n" >&2
+[ $aborting -eq 0 ] && exit 0 || exit 1
+#}}}
