@@ -163,34 +163,7 @@ wait $p_master
 [ "$(tail -n 1 ../bbsync-list-master)" != "END" ] && { printf "bbsync-list-master corrupted!\n" >&2; exit 1; }
 #}}}
 
-source <({
-
-#{{{ skipdirs
-	IFS= read -r dir <&3
-	IFS= read -r dirMaster <&4
-	while true; do
-		if [ "$dir" != "$dirMaster" ]; then
-			# must be single bracket test
-			if { [ "$dirMaster" = "END SYNC FOLDERS" ] || [ "$dir" \< "$dirMaster" ]; } && [ "$dir" != "END SYNC FOLDERS" ]; then
-				printf "%s\n" "$dir"
-				IFS= read -r dir <&3
-			else
-				printf "%s\n" "$dirMaster"
-				IFS= read -r dirMaster <&4
-			fi
-		else
-			if [ "$dir" != "END SYNC FOLDERS" ]; then
-				IFS= read -r dir <&3
-				IFS= read -r dirMaster <&4
-			else
-				break
-			fi
-		fi
-	done
-	printf "END SYNC FOLDERS\n"
-#}}}
-
-} 3<../bbsync-list 4<../bbsync-list-master | tee ../skipdirs | {
+{
 
 #{{{ get non-skipped file count
 	#{{{ variable prep
@@ -236,10 +209,40 @@ source <({
 			IFS= read -r lineMaster <&4
 		fi
 	done
-	printf "total=$total"
+	line=
+	lineMaster=
 #}}}
 
-} 3<../bbsync-list 4<../bbsync-list-master)
+} < <(
+	{
+
+#{{{ get skipdirs
+		IFS= read -r dir <&3
+		IFS= read -r dirMaster <&4
+		while true; do
+			if [ "$dir" != "$dirMaster" ]; then
+				# must be single bracket test
+				if { [ "$dirMaster" = "END SYNC FOLDERS" ] || [ "$dir" \< "$dirMaster" ]; } && [ "$dir" != "END SYNC FOLDERS" ]; then
+					printf "%s\n" "$dir"
+					IFS= read -r dir <&3
+				else
+					printf "%s\n" "$dirMaster"
+					IFS= read -r dirMaster <&4
+				fi
+			else
+				if [ "$dir" != "END SYNC FOLDERS" ]; then
+					IFS= read -r dir <&3
+					IFS= read -r dirMaster <&4
+				else
+					break
+				fi
+			fi
+		done
+		printf "END SYNC FOLDERS\n"
+#}}}
+
+	} 3<../bbsync-list 4<../bbsync-list-master | tee ../skipdirs
+) 3<../bbsync-list 4<../bbsync-list-master
 
 [ -f ../bbsync-list-last ] || printf "END SYNC FOLDERS\nEND\n" > ../bbsync-list-last
 
