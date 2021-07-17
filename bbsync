@@ -100,18 +100,10 @@ esac
 #}}}
 
 #{{{ startup and safety checks
-owd="$PWD"
 printf "Note that symlinks will be created as normal files/folders if they do not already exist. Run \`find -L sync/* -mindepth 1 -xtype l\` to list any.\n" >&2
 cd -- "$(dirname "$0")/sync" || { printf "sync dir does not exist!" >&2; exit 1; }
-trap 'cd -- "$owd"' EXIT
-exit() {
-	cd -- "$owd"
-	trap - EXIT
-	unset -f exit
-	exit "$@"
-}
 # abnormal exits cause this to not trigger if using -p
-{ [ -f ../skipdirs ] || [ -e ../actions ] || [ -e ../processes ]; } && { printf "FIFO(s) exist! Not running in case of mangled data or another process.\n" >&2; cd -- "$owd"; exit 1; }
+{ [ -f ../skipdirs ] || [ -e ../actions ] || [ -e ../processes ]; } && { printf "FIFO(s) exist! Not running in case of mangled data or another process.\n" >&2; exit 1; }
 [ -w .. ] || { printf "Cannot write to bbsync dir!\n" >&2; exit 1; }
 rm -f ../bbsync-list-master || { printf "Could not remove old bbsync-list-master!\n" >&2; exit 1; }
 rm -f ../bbsync-list || { printf "Could not remove old bbsync-list!\n" >&2; exit 1; }
