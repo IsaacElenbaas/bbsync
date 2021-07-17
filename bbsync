@@ -415,21 +415,18 @@ if [ $total -ne 0 ]; then
 
 				#{{{ upload
 								if [ "$fileF" = "d" ]; then
-									curl --insecure --silent -o >(cat >> ../log) --write-out "%{http_code}" -F "path=$file" -F "perms=$fileP" -F "mtime=$fileD" -F "dir=1" "$server/sync" > >(
-										IFS= read -r code
-										[ "$code" = "200" ] || error=1
-									)
+									IFS= read -r code < <(curl --insecure --silent -o >(cat >> ../log) --write-out "%{http_code}" -F "path=$file" -F "perms=$fileP" -F "mtime=$fileD" -F "dir=1" "$server/sync")
 									printp $process "--> %s" "$name DONE (directory)" >&2
 								else
-									curl --insecure --progress-bar -o >(cat >> ../log) --write-out "%{http_code}" -F "path=$file" -F "perms=$fileP" -F "mtime=$fileD" -F "size=$(stat -c "%s" "$file")" -F "file=@$(realpath "$file")" "$server/sync" > >(
-										IFS= read -r code
-										[ "$code" = "200" ] || error=1
-									) 2> >(
-										while IFS= read -r -d "%" progress; do
-											printp $process "--> %s" "$name #${progress#*#}%" >&2
-										done
+									IFS= read -r code < <(
+										curl --insecure --progress-bar -o >(cat >> ../log) --write-out "%{http_code}" -F "path=$file" -F "perms=$fileP" -F "mtime=$fileD" -F "size=$(stat -c "%s" "$file")" -F "file=@$(realpath "$file")" "$server/sync" 2> >(
+											while IFS= read -r -d "%" progress; do
+												printp $process "--> %s" "$name #${progress#*#}%" >&2
+											done
+										)
 									)
 								fi
+								[ "$code" = "200" ] || error=1
 				#}}}
 
 							;;
@@ -442,18 +439,18 @@ if [ $total -ne 0 ]; then
 								else
 									real="$(realpath "$file")"
 									if [ ! -e "$real" ] || mv -f "$real" "$real.bak-bbsync" 2>>../log; then
-										curl --insecure --progress-bar -o "$real" --write-out "%{http_code}" "$server/sync/$file" > >(
-											IFS= read -r code
-											[ "$code" = "200" ] || {
-												error=1
-												mv -f "$real.bak-bbsync" "$real" 2>>../log
-												printf "Failed to download %s.\n" "$file" >> ../log
-											}
-										) 2> >(
-											while IFS= read -r -d "%" progress; do
-												printp $process "<-- %s" "$name #${progress#*#}%" >&2
-											done
+										IFS= read -r code < <(
+											curl --insecure --progress-bar -o "$real" --write-out "%{http_code}" "$server/sync/$file" 2> >(
+												while IFS= read -r -d "%" progress; do
+													printp $process "<-- %s" "$name #${progress#*#}%" >&2
+												done
+											)
 										)
+										[ "$code" = "200" ] || {
+											error=1
+											mv -f "$real.bak-bbsync" "$real" 2>>../log
+											printf "Failed to download %s.\n" "$file" >> ../log
+										}
 									else
 										error=1
 									fi
