@@ -16,13 +16,16 @@ I use it to sync files between various machines while maintaining one master cop
 ## Usage
 ```
 ./bbsync [OPTIONS]
-  -d, --dry-run           perform a trial run with no changes made
-  --minshow NUM           minimum time in seconds to show actions
-  --no-progress           do not show progress during transfer
-  -p, --processes NUM     number of processes to use
-  --server URL            master server URL
-  -v, --verbose           output a diagnostic for every file that will be processed
-  -h, --help              display this help
+  --connect-timeout NUM     maximum time in seconds to allow connection attempts
+  -d, --dry-run             perform a trial run with no changes made
+  --force [push, pull]      ignore master/local state
+  --max-time NUM            maximum time in seconds to allow transfers
+  --minshow NUM             minimum time in seconds to show actions
+  --no-progress             do not show progress during transfer
+  -p, --processes NUM       number of processes to use
+  --server URL              master server URL
+  -v, --verbose             output a diagnostic for every file that will be processed
+  -h, --help                display this help
 ```
 ## Downsides
 * No moved files detection
