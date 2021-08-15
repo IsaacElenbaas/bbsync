@@ -202,6 +202,16 @@ abort() {
 trap "abort" SIGINT
 #}}}
 
+#{{{ encode
+encode() {
+	local encoded="$(curl -s --get -o /dev/null --write-out "%{url_effective}" --data-urlencode "$1" "")"
+	encoded="${encoded:2}"
+	encoded="${encoded//%2F/\/}"
+	printf "%s" "${encoded//+/%20}"
+}
+export -f encode
+#}}}
+
 #{{{ generate bbsync-lists
 { [ "$(curl$connectTimeout$maxTime --insecure --silent -o ../bbsync-list-master --write-out "%{http_code}" "$server/sync/bbsync-list")" = "200" ] || printf "FAILED\n" > ../bbsync-list-master; } &
 p_master=$!
@@ -506,8 +516,9 @@ if [ $total -ne 0 ]; then
 								else
 									real="$(realpath "$file")"
 									if [ ! -e "$real" ] || mv -f "$real" "$real.bak-bbsync" 2>>../log; then
+										mkdir -p "${real%/*}" 2 > ../log
 										IFS= read -r code < <(
-											curl$connectTimeout$maxTime --insecure --progress-bar -o "$real" --write-out "%{http_code}" "$server/sync/$file" 2> >(
+											curl$connectTimeout$maxTime --insecure --progress-bar -o "$real" --write-out "%{http_code}" "$server$(encode "/sync/$file")" 2> >(
 												while IFS= read -r -d "%" progress; do
 													printp $process "<-- %s" "$name #${progress#*#}%" >&2
 												done
@@ -515,18 +526,18 @@ if [ $total -ne 0 ]; then
 										)
 										[ "$code" = "200" ] || {
 											error=1
-											mv -f "$real.bak-bbsync" "$real" 2>/dev/null || rm "$real"
+											{ mv -f "$real.bak-bbsync" "$real" || rm "$real"; } 2>/dev/null
 											printf "Failed to download %s.\n" "$file" >> ../log
 										}
 									else
 										error=1
 										printf "Failed to back up %s.\n" "$file" >> ../log
 									fi
-									rm -rf "$real.bak-bbsync"
+									rm -rf "$real.bak-bbsync" >> ../log
 								fi
-								{ chmod $fileP "$file" && touch -m -d "@$fileD" "$file"; } 2>>../log || {
+								[ -e "$file" ] && { { chmod $fileP "$file" && touch -m -d "@$fileD" "$file"; } 2>>../log || {
 									error=1; printf "Failed to set local metadata of %s.\n" "$file" >> ../log
-								}
+								}; }
 				#}}}
 
 							;;
