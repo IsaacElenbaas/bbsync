@@ -231,13 +231,13 @@ wait $p_master
 	while true; do
 
 	#{{{ skipdirs
-		if [ "$(eval 'printf "%s" "${line::'${#skipdir}}'"')" = "$skipdir" ]; then
-			while [ "$(eval 'printf "%s" "${line::'${#skipdir}}'"')" = "$skipdir" ]; do
+		if [ "${line::${#skipdir}}" = "$skipdir" ]; then
+			while [ "${line::${#skipdir}}" = "$skipdir" ]; do
 				IFS= read -r line <&3
 			done
 			IFS= read -r skipdir
-		elif [ "$(eval 'printf "%s" "${lineMaster::'${#skipdir}}'"')" = "$skipdir" ]; then
-			while [ "$(eval 'printf "%s" "${lineMaster::'${#skipdir}}'"')" = "$skipdir" ]; do
+		elif [ "${lineMaster::${#skipdir}}" = "$skipdir" ]; then
+			while [ "${lineMaster::${#skipdir}}" = "$skipdir" ]; do
 				IFS= read -r lineMaster <&4
 			done
 			IFS= read -r skipdir
@@ -318,11 +318,11 @@ mkfifo ../actions; {
 	while true; do
 
 	#{{{ skipdirs
-		if [ "$(eval 'printf "%s" "${line::'${#skipdir}}'"')" = "$skipdir" ]; then
-			while [ "$(eval 'printf "%s" "${line::'${#skipdir}}'"')" = "$skipdir" ]; do IFS= read -r line <&3; done
+		if [ "${line::${#skipdir}}" = "$skipdir" ]; then
+			while [ "${line::${#skipdir}}" = "$skipdir" ]; do IFS= read -r line <&3; done
 			IFS= read -r skipdir <&5
-		elif [ "$(eval 'printf "%s" "${lineMaster::'${#skipdir}}'"')" = "$skipdir" ]; then
-			while [ "$(eval 'printf "%s" "${lineMaster::'${#skipdir}}'"')" = "$skipdir" ]; do IFS= read -r lineMaster <&4; done
+		elif [ "${lineMaster::${#skipdir}}" = "$skipdir" ]; then
+			while [ "${lineMaster::${#skipdir}}" = "$skipdir" ]; do IFS= read -r lineMaster <&4; done
 			IFS= read -r skipdir <&5
 		fi
 	#}}}
