@@ -204,10 +204,11 @@ trap "abort" SIGINT
 
 #{{{ encode
 encode() {
-	local encoded="$(curl -s --get -o /dev/null --write-out "%{url_effective}" --data-urlencode "$1" "")"
-	encoded="${encoded:2}"
-	encoded="${encoded//%2F/\/}"
-	printf "%s" "${encoded//+/%20}"
+	#local encoded="$(curl -s --get -o /dev/null --write-out "%{url_effective}" --data-urlencode "$1" "")"
+	#encoded="${encoded:2}"
+	#encoded="${encoded//%2F/\/}"
+	#printf "%s" "${encoded//+/%20}"
+	printf "%s" "${1// /%20}"
 }
 export -f encode
 #}}}
